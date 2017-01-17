@@ -78,9 +78,13 @@ class LogStash::Codecs::Protobuf < LogStash::Codecs::Base
   end
 
   def decode(data)
-    decoded = @obj.parse(data.to_s)
-    results = keys2strings(decoded.to_hash)
-    yield LogStash::Event.new(results) if block_given?
+    begin
+      decoded = @obj.parse(data.to_s)
+      results = keys2strings(decoded.to_hash)
+      yield LogStash::Event.new(results) if block_given?
+    rescue => e
+      @logger.debug("Couldn't decode protobuf: ${e}")
+    end
   end # def decode
 
   def keys2strings(data)
@@ -108,6 +112,8 @@ class LogStash::Codecs::Protobuf < LogStash::Codecs::Base
       msg.serialize_to_string
     rescue NoMethodError
       @logger.debug("error 2: NoMethodError. Maybe mismatching protobuf definition. Required fields are: " + event.to_hash.keys.join(", "))
+    rescue => e
+      @logger.debug("Couldn't create protobuf: ${e}")
     end
   end
 
