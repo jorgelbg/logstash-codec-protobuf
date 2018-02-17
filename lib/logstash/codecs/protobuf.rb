@@ -16,7 +16,7 @@ require 'google/protobuf'
 #  codec => protobuf 
 #  {
 #    class_name => "Animal::Unicorn"
-#    include_path => ['/path/to/protobuf/definitions/UnicornProtobuf.pb.rb']
+#    protobuf_definitions => ['/path/to/protobuf/definitions/UnicornProtobuf.pb.rb']
 #  }
 # }
 #
@@ -55,7 +55,7 @@ class LogStash::Codecs::Protobuf < LogStash::Codecs::Base
   #
   # would be configured as
   # [source,ruby]
-  # include_path => ['/path/to/protobuf/definitions/Milk.pb.rb','/path/to/protobuf/definitions/Cheese.pb.rb']
+  # protobuf_definitions => ['/path/to/protobuf/definitions/Milk.pb.rb','/path/to/protobuf/definitions/Cheese.pb.rb']
   #
   # When using the codec in an output plugin: 
   # * make sure to include all the desired fields in the protobuf definition, including timestamp. 
@@ -63,7 +63,7 @@ class LogStash::Codecs::Protobuf < LogStash::Codecs::Base
   # * the @ symbol is currently not supported in field names when loading the protobuf definitions for encoding. Make sure to call the timestamp field "timestamp" 
   #   instead of "@timestamp" in the protobuf file. Logstash event fields will be stripped of the leading @ before conversion.
   #  
-  config :include_path, :validate => :array, :required => true
+  config :protobuf_definitions, :validate => :array, :required => true
 
   # TODO documentation
   config :resolve_enums_to_int, :validate => :boolean, :required => false, :default => true
@@ -73,17 +73,21 @@ class LogStash::Codecs::Protobuf < LogStash::Codecs::Base
 
 
   def register
-    @pb_metainfo = {}
-    include_path.each { |path| require_pb_path(path) }
+    @enum_classnames = {}
+    protobuf_definitions.each { |filename| 
+      require filename
+      load_enum_metadata(filename) 
+      }
     @pb_builder = Google::Protobuf::DescriptorPool.generated_pool.lookup(class_name).msgclass
-    @logger.debug("Protobuf files successfully loaded.")
+    @logger.warn("Enum Metadata: ")
+    @logger.warn(@enum_classnames.to_hash.to_s) # TODO remove
   end
 
 
   def decode(data)
     begin
       decoded = @pb_builder.decode(data.to_s)
-      h = deep_to_hash(nil, decoded)
+      h = deep_to_hash(decoded, nil, nil)
       yield LogStash::Event.new(h) if block_given?
       
     rescue => e
@@ -100,30 +104,43 @@ class LogStash::Codecs::Protobuf < LogStash::Codecs::Base
 
 
   private
-  def deep_to_hash(original_key, input)
+  def deep_to_hash(input, parent_class_name, parent_field_name)
     if input.class.ancestors.include? Google::Protobuf::MessageExts
-      result = Hash.new
-      # if @auto_translate_enums TODO
-      #   if @resolve_enums_to_int
-      #     # add a new field with the original value
-      #     # TODO
+      # if original_key == nil 
+      #   @logger.warn("Incoming protobuf message: #{input.inspect}") # TODO remove
       # end
 
-      input.to_hash.each {|key, value|
-        result[key] = deep_to_hash(key, value) # the key is required for the class lookup of enums.
+      class_name = input.class.name
 
+      result = Hash.new
+      
+      input.to_hash.each {|key, value|
+        # class_name = if original_key != nil then [original_key, key].join('.') else key end
+        result[key] = deep_to_hash(value, class_name, key) # the class_name is required for the lookup of enum metadata.
       }
       
     elsif input.kind_of?(Array)
       result = []
       input.each {|value|
-          result << deep_to_hash(value)
+          result << deep_to_hash(value, parent_class_name, parent_field_name)
       }
     elsif input.instance_of? Symbol
       # is an Enum
       if @resolve_enums_to_int
-        enum_class = Google::Protobuf::DescriptorPool.generated_pool.lookup(original_key).enummodule
-        result = enum_class.resolve(input)
+        simplified_class_name = parent_class_name.gsub('::','.')
+        @logger.warn("Lookup for enum #{parent_class_name} field #{parent_field_name} => #{simplified_class_name}") # TODO remove
+        if not @enum_classnames.include? simplified_class_name
+          @logger.warn("Could not resolve enum to int value. No enum metadata found for class #{simplified_class_name}. Available Metadata: " + @enum_classnames.to_s)
+          result = input.to_s.sub(':','')
+        elsif not @enum_classnames[simplified_class_name].include? parent_field_name
+          @logger.warn("Could not resolve enum to int value. No enum metadata found for class #{simplified_class_name} and field #{parent_field_name}")
+          result = input.to_s.sub(':','')
+        else
+          enum_ident = @enum_classnames[parent_class_name][parent_field_name]
+          @logger.warn("Ident for enum #{enum_ident}") # TODO remove
+          enum_class = Google::Protobuf::DescriptorPool.generated_pool.lookup(enum_ident).enummodule
+          result = enum_class.resolve(input)
+        end
       else
         result = input.to_s.sub(':','')
       end
@@ -200,38 +217,38 @@ class LogStash::Codecs::Protobuf < LogStash::Codecs::Base
   end
 
   def get_complex_types(class_name)
-    @pb_metainfo[class_name]
+    @enum_classnames[class_name]
   end
 
-  def require_with_metadata_analysis(filename)
-    require filename
-    regex_class_name = /\s*class\s*(?<name>.+?)\s+/
-    regex_module_name = /\s*module\s*(?<name>.+?)\s+/
-    regex_pbdefs = /\s*(optional|repeated)(\s*):(?<type>.+),(\s*):(?<name>\w+),(\s*)(?<position>\d+)/
+  def generate_lookup_name(class_name)
+    tokens = class_name.split('.')
+    if tokens.count > 0
+      tokens[0].gsub("_","")
+    end
+    tokens.join('::')
+  end
+
+  def load_enum_metadata(filename)
+    regex_class_name = /\s*add_message "(?<name>.+?)" do\s+/ # TODO optimize both regexes for speed (negative lookahead)
+    regex_pbdefs = /\s*(optional|repeated)(\s*):(?<name>.+),(\s*):(?<type>\w+),(\s*)(?<position>\d+)(, \"(?<enum_class>.*?)\")?/
     # now we also need to find out which class it contains and the protobuf definitions in it.
     # We'll unfortunately need that later so that we can create nested objects.
     begin 
       class_name = ""
       type = ""
       field_name = ""
-      classname_found = false
       File.readlines(filename).each do |line|
-        if ! (line =~ regex_module_name).nil? && !classname_found # because it might be declared twice in the file
-          class_name << $1 
-          class_name << "::"
-    
-        end
-        if ! (line =~ regex_class_name).nil? && !classname_found # because it might be declared twice in the file
+        if ! (line =~ regex_class_name).nil? 
           class_name << $1
-          @pb_metainfo[class_name] = {}
-          classname_found = true
+          @enum_classnames[class_name] = {}
         end
         if ! (line =~ regex_pbdefs).nil?
-          type = $1
-          field_name = $2
-          if type =~ /::/
-            @pb_metainfo[class_name][field_name] = type.gsub!(/^:/,"")
-            
+          type = $2
+          field_name = $1
+          enum_class = $4
+          if type == "enum"
+            simplified_class_name = generate_lookup_name(class_name)
+            @enum_classnames[simplified_class_name][field_name] = enum_class
           end
         end
       end
@@ -243,20 +260,7 @@ class LogStash::Codecs::Protobuf < LogStash::Codecs::Base
     end    
   end
 
-  def require_pb_path(dir_or_file)
-    f = dir_or_file.end_with? ('.rb')
-    begin
-      if f
-        @logger.debug("Including protobuf file: " + dir_or_file)
-        require_with_metadata_analysis dir_or_file
-      else 
-        Dir[ dir_or_file + '/*.rb'].each { |file|
-          @logger.debug("Including protobuf path: " + dir_or_file + "/" + file)
-          require_with_metadata_analysis file 
-        }
-      end
-    end
-  end
+  
 
 
 end # class LogStash::Codecs::Protobuf

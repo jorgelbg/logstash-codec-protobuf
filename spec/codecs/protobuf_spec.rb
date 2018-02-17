@@ -12,7 +12,7 @@ describe LogStash::Codecs::Protobuf do
 
 
     #### Test case 1: Decode simple protobuf ####################################################################################################################
-    let(:plugin_unicorn) { LogStash::Codecs::Protobuf.new("class_name" => "Unicorn", "include_path" => ['spec/helpers/unicorn_pb.rb'])  }
+    let(:plugin_unicorn) { LogStash::Codecs::Protobuf.new("class_name" => "Unicorn", "protobuf_definitions" => ['spec/helpers/unicorn_pb.rb'])  }
     before do
         plugin_unicorn.register      
     end
@@ -41,7 +41,7 @@ describe LogStash::Codecs::Protobuf do
 
 
     #### Test case 2: Decode without enum translation ####################################################################################################################
-    let(:plugin_unicorn) { LogStash::Codecs::Protobuf.new("class_name" => "Unicorn", "resolve_enums_to_int" => false, "include_path" => ['spec/helpers/unicorn_pb.rb'])  }
+    let(:plugin_unicorn) { LogStash::Codecs::Protobuf.new("class_name" => "Unicorn", "resolve_enums_to_int" => false, "protobuf_definitions" => ['spec/helpers/unicorn_pb.rb'])  }
     before do
         plugin_unicorn.register      
     end
@@ -57,6 +57,7 @@ describe LogStash::Codecs::Protobuf do
       plugin_unicorn.decode(bin) do |event|
         expect(event.get("name") ).to eq(data[:name] )
         expect(event.get("fur_colour") ).to eq("GLITTER" )
+        # TODO definitely test enum non-translation for list
 
       end
     end # it
