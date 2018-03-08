@@ -84,7 +84,7 @@ class LogStash::Codecs::Protobuf < LogStash::Codecs::Base
     begin
       decoded = @pb_builder.decode(data.to_s)
       h = deep_to_hash(decoded)
-      
+      yield LogStash::Event.new(h) if block_given?
     rescue => e
       @logger.warn("Couldn't decode protobuf: #{e.inspect}.")
       # raise e
