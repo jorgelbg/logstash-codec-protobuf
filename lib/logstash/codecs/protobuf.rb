@@ -83,8 +83,7 @@ class LogStash::Codecs::Protobuf < LogStash::Codecs::Base
   def decode(data)
     begin
       decoded = @pb_builder.decode(data.to_s)
-      h = deep_to_hash(nil, decoded)
-      yield LogStash::Event.new(h) if block_given?
+      h = deep_to_hash(decoded)
       
     rescue => e
       @logger.warn("Couldn't decode protobuf: #{e.inspect}.")
@@ -100,34 +99,25 @@ class LogStash::Codecs::Protobuf < LogStash::Codecs::Base
 
 
   private
-  def deep_to_hash(original_key, input)
-    if input.class.ancestors.include? Google::Protobuf::MessageExts
+  def deep_to_hash(input)
+    if input.class.ancestors.include? Google::Protobuf::MessageExts # it's a protobuf class
       result = Hash.new
-      # if @auto_translate_enums TODO
-      #   if @resolve_enums_to_int
-      #     # add a new field with the original value
-      #     # TODO
-      # end
 
       input.to_hash.each {|key, value|
-        result[key] = deep_to_hash(key, value) # the key is required for the class lookup of enums.
-
-      }
-      
+        result[key] = deep_to_hash(value) # the key is required for the class lookup of enums.
+      }      
     elsif input.kind_of?(Array)
       result = []
       input.each {|value|
           result << deep_to_hash(value)
       }
-    elsif input.instance_of? Symbol
-      # is an Enum
-      if @resolve_enums_to_int
-        enum_class = Google::Protobuf::DescriptorPool.generated_pool.lookup(original_key).enummodule
-        result = enum_class.resolve(input)
-      else
-        result = input.to_s.sub(':','')
-      end
-
+    elsif input.kind_of?(::Hash)
+      result = {}
+      input.each {|key, value|
+          result[key] = deep_to_hash(value)
+      }
+    elsif input.instance_of? Symbol # is an Enum
+      result = input.to_s.sub(':','')
     else
       result = input
     end
